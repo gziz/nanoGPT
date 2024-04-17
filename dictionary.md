@@ -1,0 +1,5 @@
+- B: Batch size
+- T: Time -> Sequence length. (what you call S)
+- C: Channels -> model_size.
+- nh: Number of heads.
+- hs: Head size, `C / nh`

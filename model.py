@@ -33,7 +33,7 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # output projection
+        # output projection W^O
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -76,6 +76,19 @@ class CausalSelfAttention(nn.Module):
         return y
 
 class MLP(nn.Module):
+    """
+    Multi-Layer Perceptron (MLP) module. Composed of two layers.
+
+    Args:
+        config (object): Configuration object containing model parameters.
+
+    Attributes:
+        c_fc (nn.Linear): First fully connected layer (receives input).
+        gelu (nn.GELU): GELU activation function.
+        c_proj (nn.Linear): Second and last fully connected layer.
+        dropout (nn.Dropout): Dropout layer for regularization.
+
+    """
 
     def __init__(self, config):
         super().__init__()
@@ -85,6 +98,16 @@ class MLP(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
+        """
+        Forward pass of the MLP module.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor.
+
+        """
         x = self.c_fc(x)
         x = self.gelu(x)
         x = self.c_proj(x)
@@ -107,9 +130,9 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    block_size: int = 1024 ## used for position encoding
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    n_layer: int = 12
+    n_layer: int = 12 # decoder layers
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
@@ -124,8 +147,8 @@ class GPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wte = nn.Embedding(config.vocab_size, config.n_embd), ## token embedding
+            wpe = nn.Embedding(config.block_size, config.n_embd), ## position encoding
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
@@ -213,12 +236,13 @@ class GPT(nn.Module):
         print("loading weights from pretrained gpt: %s" % model_type)
 
         # n_layer, n_head and n_embd are determined from model_type
-        config_args = {
+        model_types = {
             'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
             'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
             'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
             'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
-        }[model_type]
+        }
+        config_args = model_types[model_type]
         print("forcing vocab_size=50257, block_size=1024, bias=True")
         config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
         config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
@@ -245,6 +269,7 @@ class GPT(nn.Module):
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
+        ## This doesn't mean that it uses a conv1D layer, rather that the weights are in that format.
         assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
@@ -256,7 +281,7 @@ class GPT(nn.Module):
                 # vanilla copy over the other parameters
                 assert sd_hf[k].shape == sd[k].shape
                 with torch.no_grad():
-                    sd[k].copy_(sd_hf[k])
+                    sd[k].copy_(sd_hf[k]) ## copying the value from sd_hf[k] to sd[k] (copy_ is a pytorch method)
 
         return model
 
