@@ -50,6 +50,7 @@ else:
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
+
 tokens_per_iter = config.gradient_accumulation_steps * ddp_world_size * config.batch_size * config.block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
@@ -58,9 +59,9 @@ if master_process:
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
 # note: float16 data type will automatically use a GradScaler
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # poor man's data loader
@@ -77,9 +78,9 @@ def get_batch(split):
     y = torch.stack([torch.from_numpy((data[i+1:i+1+config.block_size]).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        x, y = x.pin_memory().to(config.device, non_blocking=True), y.pin_memory().to(config.device, non_blocking=True)
     else:
-        x, y = x.to(device), y.to(device)
+        x, y = x.to(config.device), y.to(config.device)
     return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -111,7 +112,7 @@ elif config.init_from == 'resume':
     print(f"Resuming training from {config.out_dir}")
     # resume training from a checkpoint.
     ckpt_path = os.path.join(config.out_dir, 'ckpt.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=config.device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
@@ -142,10 +143,10 @@ elif config.init_from.startswith('gpt2'):
 if config.block_size < model.config.block_size:
     model.crop_block_size(config.block_size)
     model_args['block_size'] = config.block_size # so that the checkpoint will have the right value
-model.to(device)
+model.to(config.device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
@@ -241,7 +242,7 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
-    for micro_step in range(config.setdefaultgradient_accumulation_steps):
+    for micro_step in range(config.gradient_accumulation_steps):
         if ddp:
             # in DDP training we only need to sync gradients at the last micro step.
             # the official way to do this is with model.no_sync() context manager, but
