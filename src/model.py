@@ -49,11 +49,11 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+    def forward(self, x:torch.Tensor):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-
+        # nh is "number of heads", hs is "head size", and C (number of channels) = nh * hs
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        q, k, v = self.c_attn(x).split(split_size=self.n_embd, dim=2) # split along dim=2 (B, T, C*3) -> (B, T, C), (B, T, C), (B, T, C)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -64,12 +64,12 @@ class CausalSelfAttention(nn.Module):
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, hs) @ (B, nh, hs, T) -> (B, nh, T, T)
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf')) # mask out the upper triangular part of the attention matrix
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side; (B, nh, T, hs) -> (B, T, nh, hs) -> (B, T, C)
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
@@ -150,10 +150,12 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd), ## token embedding
             wpe = nn.Embedding(config.block_size, config.n_embd), ## position encoding
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]), ## hidden layers
+            ln_f = LayerNorm(config.n_embd, bias=config.bias), ## final layer norm
         ))
+        ## Based on the output size vocab size, we see this the final classifier i.e. output then token.
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -191,6 +193,7 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
+        # idx (token indexes): (B, T)
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -199,18 +202,20 @@ class GPT(nn.Module):
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
+        x = self.transformer.drop(tok_emb + pos_emb) # (b, t, n_embd)
+        for block in self.transformer.h: # hidden layers
             x = block(x)
-        x = self.transformer.ln_f(x)
+        x = self.transformer.ln_f(x) # layer norm
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
+            # inference-time mini-optimization: only select the last token
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits2 = self.lm_head(x[:, [-1], :])
+            print(logits == logits2)
             loss = None
 
         return logits, loss

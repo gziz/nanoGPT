@@ -12,11 +12,10 @@ from sample_config import config
 
 
 def initialize_device():
-# Determine device type and precision type based on configuration
-    device_type = 'cuda' if 'cuda' in config.device else 'cpu'
+# Determine precision type and context  based on configuration
     dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-    ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=dtype)
-    return device_type, dtype, ctx
+    ctx = nullcontext() if config.device == 'cpu' else torch.amp.autocast(device_type=config.device, dtype=dtype)
+    return ctx
 
 def load_model():
     # Model initialization
@@ -65,7 +64,7 @@ def main():
     torch.backends.cudnn.allow_tf32 = True  # Allow TF32 on cuDNN operations
 
     
-    device, dtype, ctx = initialize_device()
+    ctx = initialize_device()
     model, checkpoint = load_model()
 
     # Set model to evaluation mode and assign to the appropriate device

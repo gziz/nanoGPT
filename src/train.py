@@ -32,17 +32,25 @@ from model import GPTConfig, GPT
 from train_config import config
 
 
+# note: float16 data type will automatically use a GradScaler
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
+ctx = nullcontext() if config.device == 'cpu' else torch.amp.autocast(device_type=config.device, dtype=ptdtype)
+
+# model init
+model_args = dict(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, block_size=config.block_size,
+                  bias=config.bias, vocab_size=None, dropout=config.dropout) # start with model_args from command line
+
 def setup_ddp():
 # various inits, derived attributes, I/O setup
-    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+    ddp = int(os.environ.get('RANK', -1)) != -1 # get whether this a ddp run?
     if ddp:
         init_process_group(backend=config.backend)
         ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK']) # each gpu get's assigned a process
         ddp_world_size = int(os.environ['WORLD_SIZE'])
         device = f'cuda:{ddp_local_rank}'
         torch.cuda.set_device(device)
-        master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+        master_process = ddp_rank == 0 # master will do logging, checkpointing etc.
         seed_offset = ddp_rank # each process gets a different seed
         # world_size number of processes will be training simultaneously, so we can scale
         # down the desired gradient accumulation iterations per process proportionally
@@ -65,11 +73,6 @@ def setup_logging(master_process, seed_offset):
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
-# note: float16 data type will automatically use a GradScaler
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-
 # poor man's data loader
 data_dir = os.path.join('data', config.dataset)
 def get_batch(split):
@@ -82,7 +85,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - config.block_size, (config.batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+config.block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+config.block_size]).astype(np.int64)) for i in ix])
-    if device_type == 'cuda':
+    if config.device == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(config.device, non_blocking=True), y.pin_memory().to(config.device, non_blocking=True)
     else:
@@ -98,16 +101,12 @@ if os.path.exists(meta_path):
     meta_vocab_size = meta['vocab_size']
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
-# model init
-model_args = dict(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, block_size=config.block_size,
-                  bias=config.bias, vocab_size=None, dropout=config.dropout) # start with model_args from command line
 
 def get_model():
     iter_num = 0
     best_val_loss = 1e9
 
     if config.init_from == 'scratch':
-        # init a new model from scratch
         print("Initializing a new model from scratch")
         # determine the vocab size we'll use for from-scratch training
         if meta_vocab_size is None:
@@ -116,8 +115,8 @@ def get_model():
         gptconf = GPTConfig(**model_args)
         model = GPT(gptconf)
     elif config.init_from == 'resume':
-        print(f"Resuming training from {config.out_dir}")
         # resume training from a checkpoint.
+        print(f"Resuming training from {config.out_dir}")
         ckpt_path = os.path.join(config.out_dir, 'ckpt.pt')
         checkpoint = torch.load(ckpt_path, map_location=config.device)
         checkpoint_model_args = checkpoint['model_args']
@@ -132,7 +131,7 @@ def get_model():
         # fix the keys of the state dictionary :(
         # honestly no idea how checkpoints sometimes get this prefix, have to debug more
         unwanted_prefix = '_orig_mod.'
-        for k,v in list(state_dict.items()):
+        for k, v in list(state_dict.items()):
             if k.startswith(unwanted_prefix):
                 state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
         model.load_state_dict(state_dict)
@@ -150,13 +149,13 @@ def get_model():
     if config.block_size < model.config.block_size:
         model.crop_block_size(config.block_size)
         model_args['block_size'] = config.block_size # so that the checkpoint will have the right value
-    model.to(config.device)
 
+    model.to(config.device)
     return model, model_args, iter_num, best_val_loss
 
 def get_optimizer(model):
     # optimizer
-    optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
+    optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), config.device)
     if config.init_from == 'resume':
         optimizer.load_state_dict(checkpoint['optimizer'])
     checkpoint = None # free up memory
@@ -211,7 +210,6 @@ def log_wandb(master_process):
         wandb.init(project=config.wandb_project, name=config.wandb_run_name, config=config)
 
 def train(model, optimizer, scaler, iter_num, best_val_loss, master_process, ddp):
-    # training loop
     X, Y = get_batch('train') # fetch the very first batch
     t0 = time.time()
     local_iter_num = 0 # number of iterations in the lifetime of this process
@@ -307,9 +305,8 @@ def main():
     model, model_args, iter_num, best_val_loss = get_model()
     optimizer = get_optimizer(model)
 
-    # initialize a GradScaler. If enabled=False scaler is a no-op
+    # initialize a GradScaler. If enabled=False then scaler is a no-op
     scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
-
     if config.compile:
         model = compile_model(model)
 

@@ -12,6 +12,10 @@ The code in this script then overrides the globals()
 I know people are not going to love this, I just really dislike configuration
 complexity and having to prepend config. to every single variable. If someone
 comes up with a better simple Python solution I am all ears.
+
+Update: I'm using a hybrid approach:
+I don't mind prepending config, hence I'm doing it with train_config.py and sample_config.py files.
+However, I'm also leveraging this file to read configs from a file from the config dir (see makefile for an example).
 """
 
 import sys

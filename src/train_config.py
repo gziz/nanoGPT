@@ -23,10 +23,14 @@ wandb_project = 'owt'
 wandb_run_name = 'gpt2'
 
 # data
+# batch_size = 12
+# block_size = 1024
+# gradient_accumulation_steps = 5 * 8
 dataset = 'openwebtext'
-gradient_accumulation_steps = 5 * 8
-batch_size = 12
+total_batch_size = 4096
+batch_size = 4
 block_size = 1024
+gradient_accumulation_steps = total_batch_size // (batch_size * block_size)
 
 # model
 n_layer = 12
@@ -37,7 +41,7 @@ bias = False
 
 # optimizer
 learning_rate = 6e-4
-max_iters = 600000
+max_iters = 600_000
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -46,14 +50,14 @@ grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
 warmup_iters = 2000
-lr_decay_iters = 600000
+lr_decay_iters = 600_000
 min_lr = 6e-5
 
 # DDP settings
 backend = 'nccl'
 
 # system
-device = 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu' 
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
 compile = True
 
@@ -76,7 +80,7 @@ config = Config(
     wandb_run_name=wandb_run_name,
     dataset=dataset,
     gradient_accumulation_steps=gradient_accumulation_steps,
-    batch_size=batch_size,
+    batch_size=total_batch_size,
     block_size=block_size,
     n_layer=n_layer,
     n_head=n_head,
