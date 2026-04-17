@@ -208,7 +208,7 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x) # layer norm
 
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
+            # if we are given some desired targets also calculate the loss ## 1
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
@@ -359,3 +359,21 @@ class GPT(nn.Module):
             yield idx_next
 
         # return idx
+
+
+
+"""
+# NOTES + Q&A
+
+1. During inference we only take the logits for the last token to generate the next token.
+    However, during training it seems like we are using the logits for all tokens and comparing that against targets. 
+    Aren't we doing duplicate work here? 
+    For the first generated token, we're comparing the logits for that token plus all the prompt tokens, and then for the second generated token, we're comparing the logits for the first two generated tokens and also all the prompt tokens.
+    What am I missing here?
+A: During training, there's no auto-regressive loop.
+    We take the training corpus and generate a dataset to evaluate the model to generate the next token based on ground truth previous tokens, never its own predictions.
+    If the corpus is [A, B, C, D, E], then for training we would evaluate ([A] -> B), ([A, B] -> C), ([A, B, C] -> D), ([A, B, C, D] -> E).
+    All of these examples are happen during the same forward pass and are not independent data entries, however, they are evaluated independently.
+    Teacher forcing: We make the model generate the next token based on ground truth previous tokens, never its own predictions.
+
+"""
